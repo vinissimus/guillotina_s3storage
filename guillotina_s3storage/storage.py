@@ -283,6 +283,8 @@ class S3FileStorageManager:
 
     async def delete(self):
         file = self.field.get(self.field.context or self.context)
+        if file is None:
+            raise HTTPNotFound
         await self.delete_upload(file.uri)
 
 
