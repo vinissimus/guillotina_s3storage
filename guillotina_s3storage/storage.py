@@ -10,13 +10,14 @@ from guillotina import task_vars
 from guillotina.component import get_utility
 from guillotina.exceptions import FileNotFoundException
 from guillotina.files import BaseCloudFile
-from guillotina.files.utils import generate_key
+from guillotina.interfaces import IFileNameGenerator
 from guillotina.interfaces import IExternalFileStorageManager
 from guillotina.interfaces import IFileCleanup
 from guillotina.interfaces import IRequest
 from guillotina.interfaces import IResource
 from guillotina.response import HTTPNotFound
 from guillotina.schema import Object
+from guillotina.component import get_multi_adapter
 from zope.interface import implementer
 
 import aiobotocore
@@ -158,7 +159,7 @@ class S3FileStorageManager:
                 await self._abort_multipart(dm)
 
         bucket_name = await util.get_bucket_name()
-        upload_id = generate_key(self.context)
+        upload_id = get_multi_adapter((self.context, self.field), IFileNameGenerator)()
         await dm.update(
             _bucket_name=bucket_name,
             _upload_file_id=upload_id,
@@ -265,8 +266,7 @@ class S3FileStorageManager:
             )
 
         util = get_utility(IS3BlobStore)
-
-        new_uri = generate_key(self.context)
+        new_uri = get_multi_adapter((self.context, self.field), IFileNameGenerator)()
         await util._s3aioclient.copy_object(
             CopySource={"Bucket": file._bucket_name, "Key": file.uri},
             Bucket=file._bucket_name,
@@ -287,11 +287,11 @@ class S3FileStorageManager:
 
 
 class S3BlobStore:
-    def __init__(self, settings, loop=None):
+    def __init__(self, settings=None):
         self._aws_access_key = settings["aws_client_id"]
         self._aws_secret_key = settings["aws_client_secret"]
 
-        opts = dict(
+        self._opts = dict(
             aws_secret_access_key=self._aws_secret_key,
             aws_access_key_id=self._aws_access_key,
             endpoint_url=settings.get("endpoint_url"),
@@ -303,17 +303,17 @@ class S3BlobStore:
             ),
         )
 
-        if loop is None:
-            loop = asyncio.get_event_loop()
-        self._loop = loop
-
-        self._s3aiosession = aiobotocore.get_session(loop=loop)
-
-        # This client is for downloads only
-        self._s3aioclient = self._s3aiosession.create_client("s3", **opts)
         self._cached_buckets = []
-
         self._bucket_name = settings["bucket"]
+
+    async def initialize(self, app):
+        session = aiobotocore.get_session()
+        # This client is for downloads only
+        self._s3aioclient = await session.create_client("s3", **self._opts).__aenter__()
+
+    async def finalize(self, app):
+        if self._s3aioclient:
+            await self._s3aioclient.__aexit__(None, None, None)
 
     async def get_bucket_name(self):
         container = task_vars.container.get()
@@ -337,13 +337,6 @@ class S3BlobStore:
         if missing:
             await self._s3aioclient.create_bucket(Bucket=bucket_name)
         return bucket_name
-
-    async def initialize(self, app=None):
-        # No asyncio loop to run
-        self.app = app
-
-    async def finalize(self, app=None):
-        await self._s3aioclient.close()
 
     async def iterate_bucket(self):
         container = task_vars.container.get()
